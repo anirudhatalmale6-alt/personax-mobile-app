@@ -1,0 +1,2 @@
+-keep class com.personax.mobile.data.** { *; }
+-keepclassmembers class com.personax.mobile.data.** { *; }
