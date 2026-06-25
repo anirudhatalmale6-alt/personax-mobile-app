@@ -1,11 +1,17 @@
 package com.personax.mobile.ui.screens
 
 import android.annotation.SuppressLint
+import android.graphics.Bitmap
 import android.os.Bundle
+import android.view.Gravity
+import android.view.KeyEvent
+import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
 import android.webkit.*
-import android.widget.FrameLayout
+import android.widget.*
 import androidx.activity.ComponentActivity
+import androidx.core.content.ContextCompat
 import androidx.webkit.ProxyConfig
 import androidx.webkit.ProxyController
 import androidx.webkit.WebViewFeature
@@ -17,6 +23,9 @@ class BrowserActivity : ComponentActivity() {
 
     private var webView: WebView? = null
     private var proxySet = false
+    private var urlBar: EditText? = null
+    private var proxyUser: String = ""
+    private var proxyPass: String = ""
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -26,16 +35,108 @@ class BrowserActivity : ComponentActivity() {
         val store = ProfileStore(this)
         val profile = store.getProfiles().find { it.id == profileId } ?: run { finish(); return }
 
-        val container = FrameLayout(this)
-        setContentView(container)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xFF0A0B10.toInt())
+        }
+        setContentView(root)
+
+        root.addView(buildToolbar(profile))
 
         if (profile.proxy.isNotEmpty()) {
-            setWebViewProxy(profile.proxy) {
-                setupWebView(container, profile)
+            try {
+                setWebViewProxy(profile.proxy) {
+                    runOnUiThread { setupWebView(root, profile) }
+                }
+            } catch (e: Exception) {
+                setupWebView(root, profile)
             }
         } else {
-            setupWebView(container, profile)
+            setupWebView(root, profile)
         }
+    }
+
+    @SuppressLint("SetTextI18n")
+    private fun buildToolbar(profile: MobileProfile): LinearLayout {
+        val dp = resources.displayMetrics.density
+
+        val toolbar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(0xFF12131A.toInt())
+            setPadding((8 * dp).toInt(), (6 * dp).toInt(), (8 * dp).toInt(), (6 * dp).toInt())
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val btnStyle = { btn: ImageButton ->
+            btn.setBackgroundColor(0xFF1A1B24.toInt())
+            btn.setPadding((8 * dp).toInt(), (8 * dp).toInt(), (8 * dp).toInt(), (8 * dp).toInt())
+            btn.layoutParams = LinearLayout.LayoutParams((36 * dp).toInt(), (36 * dp).toInt()).apply {
+                marginEnd = (4 * dp).toInt()
+            }
+            btn.setColorFilter(0xFFE1E4E8.toInt())
+            btn.scaleType = ImageView.ScaleType.FIT_CENTER
+        }
+
+        val backBtn = ImageButton(this).apply {
+            setImageResource(android.R.drawable.ic_media_previous)
+            setOnClickListener { if (webView?.canGoBack() == true) webView?.goBack() }
+            btnStyle(this)
+        }
+
+        val homeBtn = ImageButton(this).apply {
+            setImageResource(android.R.drawable.ic_menu_revert)
+            setOnClickListener { finish() }
+            btnStyle(this)
+        }
+
+        val refreshBtn = ImageButton(this).apply {
+            setImageResource(android.R.drawable.ic_menu_rotate)
+            setOnClickListener { webView?.reload() }
+            btnStyle(this)
+        }
+
+        urlBar = EditText(this).apply {
+            setText("https://www.google.com")
+            setTextColor(0xFFE1E4E8.toInt())
+            setHintTextColor(0xFF71717A.toInt())
+            textSize = 13f
+            isSingleLine = true
+            setBackgroundColor(0xFF1A1B24.toInt())
+            setPadding((10 * dp).toInt(), (8 * dp).toInt(), (10 * dp).toInt(), (8 * dp).toInt())
+            imeOptions = EditorInfo.IME_ACTION_GO
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = (4 * dp).toInt()
+            }
+            setOnEditorActionListener { _, actionId, event ->
+                if (actionId == EditorInfo.IME_ACTION_GO || (event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)) {
+                    var url = text.toString().trim()
+                    if (!url.startsWith("http")) url = "https://$url"
+                    webView?.loadUrl(url)
+                    true
+                } else false
+            }
+        }
+
+        val badge = TextView(this).apply {
+            text = profile.deviceModel.split(" ").first().take(3).uppercase()
+            setTextColor(0xFF10B981.toInt())
+            textSize = 10f
+            setBackgroundColor(0x2610B981)
+            setPadding((6 * dp).toInt(), (4 * dp).toInt(), (6 * dp).toInt(), (4 * dp).toInt())
+            gravity = Gravity.CENTER
+        }
+
+        toolbar.addView(homeBtn)
+        toolbar.addView(backBtn)
+        toolbar.addView(refreshBtn)
+        toolbar.addView(urlBar)
+        toolbar.addView(badge)
+
+        return toolbar
     }
 
     private fun setWebViewProxy(proxyStr: String, onComplete: () -> Unit) {
@@ -44,44 +145,50 @@ class BrowserActivity : ComponentActivity() {
             return
         }
 
-        val proxyUrl = buildProxyUrl(proxyStr)
+        val parts = proxyStr.split(":")
+        val proxyHost: String
+        val proxyPort: String
 
-        val proxyConfig = ProxyConfig.Builder()
-            .addProxyRule(proxyUrl)
-            .build()
+        when {
+            parts.size == 4 -> {
+                proxyHost = parts[0]
+                proxyPort = parts[1]
+                proxyUser = parts[2]
+                proxyPass = parts[3]
+            }
+            parts.size == 2 -> {
+                proxyHost = parts[0]
+                proxyPort = parts[1]
+            }
+            else -> {
+                onComplete()
+                return
+            }
+        }
 
-        val executor = Executor { it.run() }
+        try {
+            val proxyConfig = ProxyConfig.Builder()
+                .addProxyRule("$proxyHost:$proxyPort")
+                .build()
 
-        ProxyController.getInstance().setProxyOverride(
-            proxyConfig,
-            executor
-        ) {
-            proxySet = true
+            ProxyController.getInstance().setProxyOverride(
+                proxyConfig,
+                Executor { it.run() }
+            ) {
+                proxySet = true
+                onComplete()
+            }
+        } catch (e: Exception) {
             onComplete()
         }
     }
 
-    private fun buildProxyUrl(proxyStr: String): String {
-        val parts = proxyStr.split(":")
-        return when {
-            parts.size == 4 -> {
-                val host = parts[0]
-                val port = parts[1]
-                val user = parts[2]
-                val pass = parts[3]
-                "$user:$pass@$host:$port"
-            }
-            parts.size == 2 -> proxyStr
-            else -> proxyStr
-        }
-    }
-
     @SuppressLint("SetJavaScriptEnabled")
-    private fun setupWebView(container: FrameLayout, profile: MobileProfile) {
+    private fun setupWebView(container: LinearLayout, profile: MobileProfile) {
         webView = WebView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
+            layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
+                0, 1f
             )
 
             settings.javaScriptEnabled = true
@@ -96,13 +203,15 @@ class BrowserActivity : ComponentActivity() {
             settings.javaScriptCanOpenWindowsAutomatically = true
             settings.setSupportMultipleWindows(false)
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            settings.cacheMode = WebSettings.LOAD_DEFAULT
 
             @Suppress("DEPRECATION")
             settings.databasePath = filesDir.resolve("webdata_${profile.id}").absolutePath
 
             webViewClient = object : WebViewClient() {
-                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     super.onPageStarted(view, url, favicon)
+                    urlBar?.setText(url ?: "")
                     view?.evaluateJavascript(buildSpoofScript(profile), null)
                 }
 
@@ -115,9 +224,8 @@ class BrowserActivity : ComponentActivity() {
                     view: WebView?, handler: HttpAuthHandler?,
                     host: String?, realm: String?
                 ) {
-                    val parts = profile.proxy.split(":")
-                    if (parts.size == 4) {
-                        handler?.proceed(parts[2], parts[3])
+                    if (proxyUser.isNotEmpty()) {
+                        handler?.proceed(proxyUser, proxyPass)
                     } else {
                         super.onReceivedHttpAuthRequest(view, handler, host, realm)
                     }
@@ -224,11 +332,13 @@ class BrowserActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        if (proxySet && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
-            ProxyController.getInstance().clearProxyOverride(
-                Executor { it.run() }
-            ) {}
-        }
+        try {
+            if (proxySet && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+                ProxyController.getInstance().clearProxyOverride(
+                    Executor { it.run() }
+                ) {}
+            }
+        } catch (_: Exception) {}
         webView?.destroy()
         super.onDestroy()
     }
