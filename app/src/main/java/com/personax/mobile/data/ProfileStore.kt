@@ -3,10 +3,13 @@ package com.personax.mobile.data
 import android.content.Context
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import java.net.HttpURLConnection
+import java.net.URL
 
 class ProfileStore(context: Context) {
     private val prefs = context.getSharedPreferences("personax_profiles", Context.MODE_PRIVATE)
     private val gson = Gson()
+    private val API_BASE = "https://personax.work/mobile"
 
     fun getProfiles(): MutableList<MobileProfile> {
         val json = prefs.getString("profiles", null) ?: return mutableListOf()
@@ -57,5 +60,22 @@ class ProfileStore(context: Context) {
 
     fun saveProxyPool(proxies: List<String>) {
         prefs.edit().putString("proxy_pool", gson.toJson(proxies)).apply()
+    }
+
+    fun fetchRemoteProxies(): List<String> {
+        return try {
+            val url = URL("$API_BASE/api/proxies")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.connectTimeout = 10000
+            conn.readTimeout = 10000
+            val json = conn.inputStream.bufferedReader().readText()
+            conn.disconnect()
+            val type = object : TypeToken<List<String>>() {}.type
+            val proxies: List<String> = gson.fromJson(json, type)
+            saveProxyPool(proxies)
+            proxies
+        } catch (e: Exception) {
+            getProxyPool()
+        }
     }
 }

@@ -24,8 +24,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import com.personax.mobile.data.*
 import com.personax.mobile.ui.theme.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,6 +40,18 @@ fun MainScreen() {
     var showCreateDialog by remember { mutableStateOf(false) }
     var showEditDialog by remember { mutableStateOf<MobileProfile?>(null) }
     var showFingerprintDialog by remember { mutableStateOf<MobileProfile?>(null) }
+    var proxyPool by remember { mutableStateOf(store.getProxyPool().toList()) }
+    var proxyLoading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            val remote = store.fetchRemoteProxies()
+            withContext(Dispatchers.Main) {
+                proxyPool = remote
+                proxyLoading = false
+            }
+        }
+    }
 
     fun refresh() { profiles = store.getProfiles() }
 
@@ -96,7 +112,7 @@ fun MainScreen() {
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                item { StatsBar(profiles) }
+                item { StatsBar(profiles, proxyPool.size) }
                 items(profiles, key = { it.id }) { profile ->
                     ProfileCard(
                         profile = profile,
@@ -131,11 +147,20 @@ fun MainScreen() {
 
     if (showCreateDialog) {
         CreateProfileDialog(
+            proxyPool = proxyPool,
             onDismiss = { showCreateDialog = false },
-            onCreate = { name, count ->
+            onCreate = { name, count, proxyMode, selectedProxy ->
+                val usedProxies = profiles.mapNotNull { it.proxy.ifEmpty { null } }.toSet()
+                val available = proxyPool.filter { it !in usedProxies }.toMutableList()
                 repeat(count) { i ->
                     val n = if (count > 1) "$name ${i + 1}" else name
-                    store.addProfile(DeviceDatabase.generateProfile(n))
+                    val profile = DeviceDatabase.generateProfile(n)
+                    val proxy = when (proxyMode) {
+                        "auto" -> if (available.isNotEmpty()) available.removeAt(0) else ""
+                        "manual" -> selectedProxy
+                        else -> ""
+                    }
+                    store.addProfile(profile.copy(proxy = proxy))
                 }
                 refresh()
                 showCreateDialog = false
@@ -164,7 +189,7 @@ fun MainScreen() {
 }
 
 @Composable
-fun StatsBar(profiles: List<MobileProfile>) {
+fun StatsBar(profiles: List<MobileProfile>, proxyCount: Int) {
     val active = profiles.count { it.isActive }
     Row(
         modifier = Modifier
@@ -174,8 +199,9 @@ fun StatsBar(profiles: List<MobileProfile>) {
             .padding(14.dp),
         horizontalArrangement = Arrangement.SpaceEvenly
     ) {
-        StatItem("Total", profiles.size.toString(), Accent)
+        StatItem("Profiles", profiles.size.toString(), Accent)
         StatItem("Active", active.toString(), AccentLight)
+        StatItem("Proxies", proxyCount.toString(), Warning)
         StatItem("Devices", "15", Info)
     }
 }
@@ -379,16 +405,22 @@ fun InfoChip(text: String, modifier: Modifier = Modifier) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CreateProfileDialog(onDismiss: () -> Unit, onCreate: (String, Int) -> Unit) {
+fun CreateProfileDialog(proxyPool: List<String>, onDismiss: () -> Unit, onCreate: (String, Int, String, String) -> Unit) {
     var name by remember { mutableStateOf("") }
     var count by remember { mutableStateOf("1") }
+    var proxyMode by remember { mutableStateOf("auto") }
+    var manualProxy by remember { mutableStateOf("") }
+    var showProxyPicker by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = BgCard,
         title = { Text("New Profile", color = Color.White) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 OutlinedTextField(
                     value = name, onValueChange = { name = it },
                     label = { Text("Profile Name") },
@@ -412,6 +444,68 @@ fun CreateProfileDialog(onDismiss: () -> Unit, onCreate: (String, Int) -> Unit) 
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
+
+                Text("Proxy Assignment", color = Accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("auto" to "Auto-Assign", "manual" to "Pick Proxy", "none" to "None").forEach { (mode, label) ->
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .border(1.dp, if (proxyMode == mode) Accent else Border, RoundedCornerShape(8.dp))
+                                .background(if (proxyMode == mode) Accent.copy(.2f) else Color.Transparent)
+                                .clickable {
+                                    proxyMode = mode
+                                    if (mode == "manual") showProxyPicker = true
+                                }
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Text(label, color = if (proxyMode == mode) Accent else TextMuted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+
+                when (proxyMode) {
+                    "auto" -> {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Accent.copy(.1f))
+                                .padding(10.dp)
+                        ) {
+                            Text(
+                                "${proxyPool.size} proxies available - each profile gets a unique proxy automatically",
+                                color = Accent, fontSize = 11.sp
+                            )
+                        }
+                    }
+                    "manual" -> {
+                        if (manualProxy.isNotEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(BgDark)
+                                    .padding(10.dp)
+                            ) {
+                                Text(manualProxy, color = TextPrimary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = { showProxyPicker = true },
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, Border),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                if (manualProxy.isEmpty()) "Choose from ${proxyPool.size} proxies" else "Change Proxy",
+                                color = TextSecondary, fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+
                 Text("Each profile gets a random real device fingerprint", color = TextDim, fontSize = 11.sp)
             }
         },
@@ -420,12 +514,80 @@ fun CreateProfileDialog(onDismiss: () -> Unit, onCreate: (String, Int) -> Unit) 
                 onClick = {
                     val n = name.ifEmpty { "Mobile" }
                     val c = (count.toIntOrNull() ?: 1).coerceIn(1, 50)
-                    onCreate(n, c)
+                    onCreate(n, c, proxyMode, manualProxy)
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = Accent)
             ) { Text("Create") }
         },
         dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel", color = TextMuted) }
+        }
+    )
+
+    if (showProxyPicker) {
+        ProxyPickerDialog(
+            proxies = proxyPool,
+            onDismiss = { showProxyPicker = false },
+            onSelect = { proxy ->
+                manualProxy = proxy
+                proxyMode = "manual"
+                showProxyPicker = false
+            }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ProxyPickerDialog(proxies: List<String>, onDismiss: () -> Unit, onSelect: (String) -> Unit) {
+    var search by remember { mutableStateOf("") }
+    val filtered = remember(search, proxies) {
+        if (search.isEmpty()) proxies.take(100) else proxies.filter { it.contains(search, true) }.take(100)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = BgCard,
+        title = { Text("Select Proxy (${proxies.size} available)", color = Color.White, fontSize = 16.sp) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = search, onValueChange = { search = it },
+                    placeholder = { Text("Search proxies...") },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Accent, unfocusedBorderColor = Border,
+                        focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(modifier = Modifier.height(300.dp)) {
+                    items(filtered, key = { it }) { proxy ->
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSelect(proxy) }
+                                .padding(vertical = 6.dp, horizontal = 4.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(BgDark)
+                                .padding(8.dp)
+                        ) {
+                            Text(
+                                proxy.split(":").take(2).joinToString(":"),
+                                color = TextPrimary, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+                if (proxies.size > 100 && search.isEmpty()) {
+                    Text("Showing first 100 - search to find specific proxies", color = TextDim, fontSize = 10.sp,
+                        modifier = Modifier.padding(top = 4.dp))
+                }
+            }
+        },
+        confirmButton = {
             TextButton(onClick = onDismiss) { Text("Cancel", color = TextMuted) }
         }
     )
